@@ -36,7 +36,7 @@ Music-Island/
 
 ```bash
 # 克隆仓库
-git clone https://github.com/你的用户名/Music-Island.git
+git clone https://github.com/daileyu1221/Music-Island.git
 cd Music-Island
 
 # 安装依赖
