@@ -1,2 +1,84 @@
-# Music-Island
-Music Island --- a Python-powered music player with Dynamic Island-style floating UI.
+# 🎵 灵动音乐盒 (Music Island)
+
+一款基于 PyQt6 的桌面音乐播放器，采用 Fluent Design 风格，支持多平台在线搜索和本地音乐播放，配有类似 Apple Dynamic Island 的悬浮灵动岛歌词控件。
+
+![Python](https://img.shields.io/badge/Python-3.8+-blue.svg)
+![PyQt6](https://img.shields.io/badge/PyQt6-6.5+-green.svg)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
+
+## ✨ 功能特性
+
+- 🎵 **网易云音乐搜索** — 通过第三方 API 搜索并播放网易云音乐，支持默认/备用两种 API 源
+- 🎶 **波点音乐搜索** — 搜索并播放波点音乐，支持多种音质（320k mp3 / 2000k flac / 128k mp3 / 48k aac / 192k ogg）
+- 📁 **本地音乐播放** — 支持 mp3 / flac / ogg / m4a / aac / wav / wma 格式，自动读取内嵌元数据（歌名、歌手、专辑、歌词、封面）
+- 🏝️ **灵动岛悬浮窗** — 屏幕顶部居中的迷你播放控件，展开后显示歌词、进度条、播放控制
+- 📝 **歌词同步** — LRC 格式歌词实时逐行高亮显示
+- 🖼️ **封面自动加载** — 在线歌曲自动下载封面，本地歌曲自动匹配同名图片
+- 📋 **播放列表** — 支持添加、移除、清空，双击切换歌曲
+- 🔁 **播放模式** — 单曲循环 / 列表循环 / 随机播放
+- 🖥️ **系统托盘** — 关闭主窗口后灵动岛仍保留，托盘可快速显示窗口、播放/暂停、退出
+
+## ⚠️ 特此说明
+
+**尊重音乐平台版权，尊重正版！** 本软件仅供学习交流使用，请勿用于商业用途。
+
+## 📁 项目结构
+
+```
+Music-Island/
+├── main.py          # 全部源码（单文件）
+├── requirements.txt # Python 依赖
+├── LICENSE          # MIT 协议
+└── README.md        # 项目说明
+```
+
+## 🚀 安装与运行
+
+```bash
+# 克隆仓库
+git clone https://github.com/你的用户名/Music-Island.git
+cd Music-Island
+
+# 安装依赖
+pip install -r requirements.txt
+
+# 运行
+python main.py
+```
+
+## 📦 主要依赖
+
+| 库 | 用途 |
+|---|---|
+| PyQt6 | GUI 框架（Core / Widgets / Gui / Multimedia） |
+| qfluentwidgets | Fluent Design 风格组件 |
+| requests | HTTP 请求（API 调用、封面下载） |
+| mutagen | 本地音频文件元数据读取（ID3 / MP4 / FLAC / Ogg） |
+
+## 🔌 API 接口（均来源于网络）
+
+| 数据源 | 说明 |
+|---|---|
+| 波点音乐 | 搜索 + 播放链接 + 歌词，返回 JSON |
+| 网易云（默认）| 搜索返回数组，播放链接需 302 重定向解析 |
+| 网易云（备用）| 搜索 + 单曲详情 + 歌词 + 播放地址 |
+
+## 📖 使用说明
+
+1. 启动后自动打开主窗口和灵动岛悬浮窗
+2. 在侧边栏选择「网易云音乐搜索」或「波点音乐搜索」，输入歌曲名搜索
+3. 双击搜索结果即可播放，歌曲自动添加到播放列表
+4. 右键歌曲可「播放」或「添加到播放列表」
+5. 鼠标悬停灵动岛可展开查看歌词和控制播放
+6. 主窗口可关闭，灵动岛和托盘仍保留
+7. 本地音乐页面支持添加音频文件或整个文件夹，自动匹配同名歌词（.lrc）和封面图片
+
+## 👨‍💻 作者
+
+文宇香香（文宇香香工作室）
+
+## 📄 License
+
+本项目采用 [MIT License](LICENSE) 开源协议。
+
+> **Disclaimer**: This project is for educational purposes only. All music copyrights belong to their respective owners. "Dynamic Island" is a trademark of Apple Inc. This project is not affiliated with or endorsed by Apple Inc.
