@@ -5,7 +5,6 @@ import json
 import threading
 import tempfile
 import requests
-import urllib.parse
 from PyQt6.QtCore import Qt, QUrl, QPropertyAnimation, QEasingCurve, pyqtSignal, QSize, QTimer, QObject, QParallelAnimationGroup, QAbstractAnimation
 from PyQt6.QtWidgets import (QApplication, QVBoxLayout, QHBoxLayout, QWidget,
                              QSystemTrayIcon, QMenu, QListWidget, QListWidgetItem,
@@ -29,18 +28,74 @@ from qfluentwidgets import (
 )
 
 # API 配置
-API_BDYY = "https://api.xcvts.cn/api/music/bdyy"      # 波点音乐 API
 API_NETEASE = "https://api.qijieya.cn/meting/"         # 网易云音乐 API（搜索）
 API_NETEASE_BACKUP = "https://www.ffapi.cn/int/v1/dg_netease"  # 备用网易云 API
+API_NETEASE_ALBUM = "https://api.bugpk.com/api/163_music"      # 网易云专辑 API
 
 # 全局设置
 _app_settings = {"netease_api": "default"}
+
+# 播放列表存储目录
+_PLAYLIST_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "list")
+os.makedirs(_PLAYLIST_DIR, exist_ok=True)
 
 
 def _format_duration(ms):
     """毫秒转 mm:ss"""
     s = ms // 1000
     return f"{s // 60:02d}:{s % 60:02d}"
+
+
+def _save_playlist_file(name, songs):
+    """保存播放列表到 list/ 目录"""
+    safe_name = re.sub(r'[\\/:*?"<>|]', '_', name).strip()
+    if not safe_name:
+        return False
+    path = os.path.join(_PLAYLIST_DIR, f"{safe_name}.json")
+    try:
+        with open(path, 'w', encoding='utf-8') as f:
+            json.dump(songs, f, ensure_ascii=False, indent=2)
+        return True
+    except Exception as e:
+        print(f"[Playlist] 保存失败: {e}")
+        return False
+
+
+def _load_playlist_file(name):
+    """从 list/ 目录加载播放列表"""
+    safe_name = re.sub(r'[\\/:*?"<>|]', '_', name).strip()
+    path = os.path.join(_PLAYLIST_DIR, f"{safe_name}.json")
+    try:
+        with open(path, 'r', encoding='utf-8') as f:
+            return json.load(f)
+    except Exception as e:
+        print(f"[Playlist] 加载失败: {e}")
+        return []
+
+
+def _list_playlist_files():
+    """列出所有已保存的播放列表文件名（不含扩展名）"""
+    try:
+        names = []
+        for f in os.listdir(_PLAYLIST_DIR):
+            if f.endswith('.json'):
+                names.append(os.path.splitext(f)[0])
+        return sorted(names)
+    except Exception:
+        return []
+
+
+def _delete_playlist_file(name):
+    """删除播放列表文件"""
+    safe_name = re.sub(r'[\\/:*?"<>|]', '_', name).strip()
+    path = os.path.join(_PLAYLIST_DIR, f"{safe_name}.json")
+    try:
+        if os.path.exists(path):
+            os.remove(path)
+            return True
+    except Exception as e:
+        print(f"[Playlist] 删除失败: {e}")
+    return False
 
 
 # 临时文件管理
@@ -904,158 +959,232 @@ class NeteaseSearchPage(QWidget):
         self.np_album.setText(f"专辑：{album}")
 
 
-# ---------------------------- 波点音乐搜索页面 ----------------------------
-class BodianSearchPage(QWidget):
+# ---------------------------- 网易云歌单/专辑导入页面 ----------------------------
+class NeteaseImportPage(QWidget):
 
+    songs_imported = pyqtSignal(list)
     song_selected = pyqtSignal(dict)
     add_to_playlist = pyqtSignal(dict)
-    search_finished = pyqtSignal(list, str)
-    no_results = pyqtSignal(str)
-    search_error = pyqtSignal(str)
+    _import_done_signal = pyqtSignal(str, list)
+    _import_error_signal = pyqtSignal(str)
 
     def __init__(self, parent=None):
         super().__init__(parent)
+        self._import_done_signal.connect(self._on_import_done)
+        self._import_error_signal.connect(self._on_import_error)
         self.setup_ui()
-        self.search_results = []
-
-        self.search_finished.connect(self._display_results)
-        self.no_results.connect(self._no_results)
-        self.search_error.connect(self._search_error)
+        self.imported_songs = []
+        self._http_session = requests.Session()
+        self._http_session.headers.update({'User-Agent': 'Mozilla/5.0'})
 
     def setup_ui(self):
         layout = QVBoxLayout(self)
         layout.setContentsMargins(20, 20, 20, 20)
         layout.setSpacing(15)
 
-        title = TitleLabel("波点音乐搜索")
+        title = TitleLabel("网易云导入")
         layout.addWidget(title)
 
-        search_layout = QHBoxLayout()
-        self.search_input = SearchLineEdit()
-        self.search_input.setPlaceholderText("输入歌曲名搜索...")
-        self.search_input.returnPressed.connect(self.search_song)
-        search_layout.addWidget(self.search_input)
+        desc = CaptionLabel("通过专辑ID或歌单ID导入歌曲（歌单须为公开状态）")
+        desc.setTextColor(150, 150, 150)
+        layout.addWidget(desc)
 
-        self.search_btn = PrimaryPushButton("搜索")
-        self.search_btn.setFixedWidth(100)
-        self.search_btn.clicked.connect(self.search_song)
-        search_layout.addWidget(self.search_btn)
-        layout.addLayout(search_layout)
+        type_layout = QHBoxLayout()
+        type_label = BodyLabel("导入类型：")
+        type_layout.addWidget(type_label)
+        self.type_combo = QComboBox()
+        self.type_combo.addItems(["专辑", "歌单"])
+        self.type_combo.setFixedWidth(120)
+        type_layout.addWidget(self.type_combo)
+        type_layout.addStretch()
+        layout.addLayout(type_layout)
 
-        self.result_label = BodyLabel("搜索结果")
+        id_layout = QHBoxLayout()
+        self.id_input = SearchLineEdit()
+        self.id_input.setPlaceholderText("输入专辑ID或歌单ID...")
+        self.id_input.returnPressed.connect(self._do_import)
+        id_layout.addWidget(self.id_input)
+
+        self.import_btn = PrimaryPushButton("导入")
+        self.import_btn.setFixedWidth(100)
+        self.import_btn.clicked.connect(self._do_import)
+        id_layout.addWidget(self.import_btn)
+        layout.addLayout(id_layout)
+
+        self.info_label = CaptionLabel("")
+        self.info_label.setTextColor(150, 150, 150)
+        self.info_label.setWordWrap(True)
+        layout.addWidget(self.info_label)
+
+        self.result_label = BodyLabel("导入结果")
         layout.addWidget(self.result_label)
 
         self.result_list = QListWidget()
-        self.result_list.itemDoubleClicked.connect(self.on_item_double_clicked)
+        self.result_list.itemDoubleClicked.connect(self._on_item_double_clicked)
         self.result_list.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         self.result_list.customContextMenuRequested.connect(self._on_context_menu)
         layout.addWidget(self.result_list)
 
-        self.now_playing_card = SimpleCardWidget()
-        np_layout = QVBoxLayout(self.now_playing_card)
-        np_layout.setContentsMargins(15, 15, 15, 15)
+        btn_layout = QHBoxLayout()
+        self.add_all_btn = PushButton("全部添加到播放列表")
+        self.add_all_btn.clicked.connect(self._on_add_all)
+        self.add_all_btn.setEnabled(False)
+        btn_layout.addWidget(self.add_all_btn)
 
-        np_header = QHBoxLayout()
-        np_icon = IconWidget()
-        np_icon.setIcon(FIF.MUSIC)
-        np_icon.setFixedSize(24, 24)
-        np_header.addWidget(np_icon)
-        np_title = BodyLabel("正在播放")
-        np_title.setStyleSheet("font-weight: bold;")
-        np_header.addWidget(np_title)
-        np_header.addStretch()
-        np_layout.addLayout(np_header)
+        self.play_first_btn = PushButton("播放第一首")
+        self.play_first_btn.clicked.connect(self._on_play_first)
+        self.play_first_btn.setEnabled(False)
+        btn_layout.addWidget(self.play_first_btn)
+        btn_layout.addStretch()
+        layout.addLayout(btn_layout)
 
-        self.np_song = CaptionLabel("未选择歌曲")
-        np_layout.addWidget(self.np_song)
-        self.np_artist = CaptionLabel("")
-        self.np_artist.setTextColor(150, 150, 150)
-        np_layout.addWidget(self.np_artist)
-        self.np_album = CaptionLabel("")
-        self.np_album.setTextColor(150, 150, 150)
-        np_layout.addWidget(self.np_album)
-
-        layout.addWidget(self.now_playing_card)
         layout.addStretch()
 
-    def search_song(self):
-        keyword = self.search_input.text().strip()
-        if not keyword:
-            InfoBar.warning("提示", "请输入歌曲名", duration=2000, parent=self)
+    def _do_import(self):
+        id_text = self.id_input.text().strip()
+        if not id_text:
+            InfoBar.warning("提示", "请输入ID", duration=2000, parent=self)
             return
 
-        self.search_btn.setEnabled(False)
-        self.search_btn.setText("搜索中...")
+        if not id_text.isdigit():
+            InfoBar.warning("提示", "ID必须为纯数字", duration=2000, parent=self)
+            return
+
+        self.import_btn.setEnabled(False)
+        self.import_btn.setText("导入中...")
         self.result_list.clear()
-        self.search_results = []
+        self.imported_songs = []
+        self.info_label.setText("")
+        self.add_all_btn.setEnabled(False)
+        self.play_first_btn.setEnabled(False)
 
-        threading.Thread(target=self._do_search, args=(keyword,), daemon=True).start()
+        import_type = "album" if self.type_combo.currentIndex() == 0 else "playlist"
+        threading.Thread(target=self._do_fetch, args=(import_type, id_text), daemon=True).start()
 
-    def _do_search(self, keyword):
+    def _do_fetch(self, import_type, id_text):
         try:
-            encoded = urllib.parse.quote(keyword)
-            songs = []
-            for n in range(1, 11):
-                url = f"{API_BDYY}?msg={encoded}&n={n}&type=json"
-                try:
-                    resp = requests.get(url, timeout=10)
-                    data = resp.json()
-                    if data.get('code') == 200 and data.get('data'):
-                        d = data['data']
-                        songs.append({
-                            'source': 'bodian',
-                            'name': d.get('name', '未知'),
-                            'artist': d.get('artist', '未知歌手'),
-                            'album': '',
-                            'cover': d.get('cover', ''),
-                            'play_url': d.get('play_url', ''),
-                            'lrc': d.get('lrc', ''),
-                        })
-                except Exception:
-                    continue
-
-            if songs:
-                self.search_finished.emit(songs, keyword)
+            if import_type == "album":
+                self._fetch_album(id_text)
             else:
-                self.no_results.emit(keyword)
+                self._fetch_playlist(id_text)
+        except Exception as e:
+            print(f"[Import] 导入失败: {e}")
+            import traceback
+            traceback.print_exc()
+            self._import_error_signal.emit(str(e))
 
-        except Exception:
-            self.search_error.emit(keyword)
+    def _fetch_album(self, album_id):
+        resp = self._http_session.get(API_NETEASE_ALBUM, params={
+            'type': 'album', 'id': album_id
+        }, timeout=(5, 15))
+        data = resp.json()
 
-    def _display_results(self, songs, keyword):
-        self.search_results = songs
+        if data.get('code') != 200 or not data.get('data'):
+            self._import_error_signal.emit(data.get('msg', '专辑不存在或请求失败'))
+            return
+
+        album_data = data['data']
+        album_name = album_data.get('name', '未知专辑')
+        artist = album_data.get('artist', '未知歌手')
+        cover_url = album_data.get('coverImgUrl', '')
+        songs_raw = album_data.get('songs', [])
+
+        if not songs_raw:
+            self._import_error_signal.emit('该专辑中没有歌曲')
+            return
+
+        songs = []
+        for s in songs_raw:
+            song_id = s.get('id', '')
+            pic = s.get('picUrl', '') or cover_url
+            play_url = f"{API_NETEASE}?server=netease&type=url&id={song_id}"
+            lrc_url = f"{API_NETEASE}?server=netease&type=lrc&id={song_id}"
+            songs.append({
+                'source': 'netease',
+                'id': str(song_id),
+                'name': s.get('name', '未知'),
+                'artist': s.get('artists', artist),
+                'album': s.get('album', album_name),
+                'cover': pic,
+                'play_url': play_url,
+                'lrc_url': lrc_url,
+                'duration': 0,
+            })
+
+        self._import_done_signal.emit(f"专辑「{album_name}」- {artist}，共 {len(songs)} 首歌曲", songs)
+
+    def _fetch_playlist(self, playlist_id):
+        resp = self._http_session.get(API_NETEASE, params={
+            'type': 'playlist', 'id': playlist_id
+        }, timeout=(5, 15))
+        data = resp.json()
+
+        if not isinstance(data, list) or len(data) == 0:
+            self._import_error_signal.emit('歌单不存在、未公开或请求失败')
+            return
+
+        songs = []
+        for s in data:
+            name = s.get('name', '未知')
+            artist = s.get('artist', '未知歌手')
+            pic = s.get('pic', '')
+            play_url = s.get('url', '')
+            lrc_url = s.get('lrc', '')
+            songs.append({
+                'source': 'netease',
+                'id': '',
+                'name': name,
+                'artist': artist,
+                'album': '',
+                'cover': pic,
+                'play_url': play_url,
+                'lrc_url': lrc_url,
+                'duration': 0,
+            })
+
+        self._import_done_signal.emit(f"歌单导入成功，共 {len(songs)} 首歌曲", songs)
+
+    def _on_import_done(self, info_text, songs):
+        self.imported_songs = songs
+        self.info_label.setText(info_text)
         self.result_list.clear()
         for song in songs:
             name = song.get('name', '未知')
             artist = song.get('artist', '未知歌手')
+            album = song.get('album', '')
             item_text = f"{name}  -  {artist}"
+            if album:
+                item_text += f"  |  《{album}》"
             item = QListWidgetItem(item_text)
             item.setData(Qt.ItemDataRole.UserRole, song)
             self.result_list.addItem(item)
 
-        self.result_label.setText(f"搜索结果（共 {len(songs)} 首）")
-        InfoBar.success("搜索成功", f"找到 {len(songs)} 首歌曲", duration=2000, parent=self)
-        self.search_btn.setEnabled(True)
-        self.search_btn.setText("搜索")
+        self.result_label.setText(f"导入结果（共 {len(songs)} 首）")
+        self.import_btn.setEnabled(True)
+        self.import_btn.setText("导入")
+        self.add_all_btn.setEnabled(True)
+        self.play_first_btn.setEnabled(True)
+        InfoBar.success("导入成功", info_text, duration=3000, parent=self)
 
-    def _no_results(self, keyword):
-        self.result_list.clear()
-        self.result_label.setText(f"未找到「{keyword}」相关歌曲")
-        InfoBar.info("未找到结果", f"未找到与「{keyword}」相关的歌曲", duration=3000, parent=self)
-        self.search_btn.setEnabled(True)
-        self.search_btn.setText("搜索")
+    def _on_import_error(self, msg):
+        self.info_label.setText(f"导入失败：{msg}")
+        self.result_label.setText("导入结果")
+        self.import_btn.setEnabled(True)
+        self.import_btn.setText("导入")
+        InfoBar.error("导入失败", msg, duration=3000, parent=self)
 
-    def _search_error(self, keyword):
-        self.result_list.clear()
-        self.result_label.setText("搜索失败")
-        InfoBar.error("搜索失败", "网络连接异常，请稍后重试", duration=3000, parent=self)
-        self.search_btn.setEnabled(True)
-        self.search_btn.setText("搜索")
-
-    def on_item_double_clicked(self, item):
+    def _on_item_double_clicked(self, item):
         song_data = item.data(Qt.ItemDataRole.UserRole)
         if song_data:
             self.song_selected.emit(song_data)
+
+    def _on_add_all(self):
+        if self.imported_songs:
+            self.songs_imported.emit(self.imported_songs)
+
+    def _on_play_first(self):
+        if self.imported_songs:
+            self.song_selected.emit(self.imported_songs[0])
 
     def _on_context_menu(self, pos):
         item = self.result_list.itemAt(pos)
@@ -1074,11 +1203,6 @@ class BodianSearchPage(QWidget):
         elif action == add_action:
             self.add_to_playlist.emit(song_data)
 
-    def update_now_playing(self, name, artist, album):
-        self.np_song.setText(name)
-        self.np_artist.setText(f"歌手：{artist}")
-        self.np_album.setText(f"专辑：{album}")
-
 
 # ---------------------------- 播放列表页面 ----------------------------
 class PlaylistPage(QWidget):
@@ -1087,6 +1211,10 @@ class PlaylistPage(QWidget):
     play_mode_changed = pyqtSignal(str)
     remove_song_requested = pyqtSignal(int)
     clear_playlist_requested = pyqtSignal()
+    save_playlist_requested = pyqtSignal(str)
+    load_playlist_requested = pyqtSignal(str)
+    delete_playlist_requested = pyqtSignal(str)
+    rename_playlist_requested = pyqtSignal(str, str)
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -1099,6 +1227,33 @@ class PlaylistPage(QWidget):
 
         title = TitleLabel("播放列表")
         layout.addWidget(title)
+
+        # 播放列表切换
+        list_layout = QHBoxLayout()
+        list_label = BodyLabel("歌单：")
+        list_layout.addWidget(list_label)
+
+        self.playlist_combo = QComboBox()
+        self.playlist_combo.setMinimumWidth(150)
+        self.playlist_combo.currentIndexChanged.connect(self._on_playlist_switched)
+        list_layout.addWidget(self.playlist_combo, 1)
+
+        self.save_btn = PushButton("保存")
+        self.save_btn.setFixedWidth(60)
+        self.save_btn.clicked.connect(self._on_save_clicked)
+        list_layout.addWidget(self.save_btn)
+
+        self.rename_btn = PushButton("改名")
+        self.rename_btn.setFixedWidth(60)
+        self.rename_btn.clicked.connect(self._on_rename_clicked)
+        list_layout.addWidget(self.rename_btn)
+
+        self.delete_btn = PushButton("删除")
+        self.delete_btn.setFixedWidth(60)
+        self.delete_btn.clicked.connect(self._on_delete_clicked)
+        list_layout.addWidget(self.delete_btn)
+
+        layout.addLayout(list_layout)
 
         # 播放模式选择
         mode_layout = QHBoxLayout()
@@ -1232,6 +1387,50 @@ class PlaylistPage(QWidget):
     def _on_clear_clicked(self):
         self.clear_playlist_requested.emit()
 
+    def refresh_playlist_list(self, names, current_name=""):
+        """刷新歌单下拉列表"""
+        self.playlist_combo.blockSignals(True)
+        self.playlist_combo.clear()
+        self.playlist_combo.addItem("（未保存的播放列表）")
+        for n in names:
+            self.playlist_combo.addItem(n)
+        if current_name and current_name in names:
+            self.playlist_combo.setCurrentText(current_name)
+        else:
+            self.playlist_combo.setCurrentIndex(0)
+        self.playlist_combo.blockSignals(False)
+
+    def _on_playlist_switched(self, index):
+        if index <= 0:
+            self.clear_playlist_requested.emit()
+            return
+        name = self.playlist_combo.currentText()
+        if name:
+            self.load_playlist_requested.emit(name)
+
+    def _on_save_clicked(self):
+        from PyQt6.QtWidgets import QInputDialog
+        name, ok = QInputDialog.getText(self, "保存播放列表", "输入歌单名称：")
+        if ok and name.strip():
+            self.save_playlist_requested.emit(name.strip())
+
+    def _on_rename_clicked(self):
+        current = self.playlist_combo.currentText()
+        if not current or current.startswith("（"):
+            InfoBar.warning("提示", "请先选择一个已保存的歌单", duration=2000, parent=self)
+            return
+        from PyQt6.QtWidgets import QInputDialog
+        new_name, ok = QInputDialog.getText(self, "重命名歌单", "输入新名称：", text=current)
+        if ok and new_name.strip() and new_name.strip() != current:
+            self.rename_playlist_requested.emit(current, new_name.strip())
+
+    def _on_delete_clicked(self):
+        current = self.playlist_combo.currentText()
+        if not current or current.startswith("（"):
+            InfoBar.warning("提示", "请先选择一个已保存的歌单", duration=2000, parent=self)
+            return
+        self.delete_playlist_requested.emit(current)
+
 
 # ---------------------------- 歌曲信息获取（后台线程） ----------------------------
 
@@ -1341,21 +1540,6 @@ class _SongWorker(QObject):
                         print(f"[SongWorker] 备用API歌词长度: {len(lrc_text)}")
                     except Exception as e:
                         print(f"[SongWorker] 备用API获取歌词失败: {e}")
-
-            elif source == 'bodian':
-                play_url = song_data.get('play_url', '')
-                lrc_text = song_data.get('lrc', '')
-
-                # 清理歌词前缀（去掉非时间戳行）
-                if lrc_text:
-                    lrc_text = lrc_text.replace('\r\n', '\n').replace('\r', '\n')
-                    lines = lrc_text.strip().split('\n')
-                    cleaned = []
-                    for line in lines:
-                        line = line.strip()
-                        if line and re.match(r'\[\d{2}:\d{2}', line):
-                            cleaned.append(line)
-                    lrc_text = '\n'.join(cleaned)
 
             print(f"[SongWorker] 完成: play_url={'有' if play_url else '无'}, lrc={'有' if lrc_text else '无'}")
             self.song_ready.emit(play_url, lrc_text, cover_url)
@@ -1490,7 +1674,7 @@ class SettingsPage(QWidget):
         api_icon.setIcon(FIF.GLOBE)
         api_icon.setFixedSize(24, 24)
         api_header.addWidget(api_icon)
-        api_title = BodyLabel("网易云音乐 API")
+        api_title = BodyLabel("网易云音乐 API切换")
         api_title.setStyleSheet("font-weight: bold;")
         api_header.addWidget(api_title)
         api_header.addStretch()
@@ -1501,7 +1685,7 @@ class SettingsPage(QWidget):
         api_layout.addWidget(api_desc)
 
         self.api_combo = ComboBox()
-        self.api_combo.addItems(["默认 API (qijieya)", "备用 API (ffapi)"])
+        self.api_combo.addItems(["默认 API", "备用 API"])
         self.api_combo.setFixedWidth(250)
         self.api_combo.currentIndexChanged.connect(self._on_api_changed)
         api_layout.addWidget(self.api_combo)
@@ -1532,12 +1716,14 @@ class SettingsPage(QWidget):
         about_author.setTextColor(180, 180, 180)
         about_layout.addWidget(about_author)
 
-        about_ver = CaptionLabel("版本：1.0.0")
+        about_ver = CaptionLabel("版本：2.0.0（2026.6.21更新）")
         about_ver.setTextColor(150, 150, 150)
         about_layout.addWidget(about_ver)
 
         about_desc = CaptionLabel(
-            "支持网易云音乐、波点音乐在线搜索播放，\n"
+            "[New]支持网易云音乐歌单&专辑导入，\n"
+            "[New]支持播放列表导出&导入，\n"
+            "支持网易云音乐在线搜索播放，\n"
             "支持本地音乐播放，自动匹配歌词和封面。"
         )
         about_desc.setTextColor(150, 150, 150)
@@ -1824,13 +2010,14 @@ class MusicPlayer(FluentWindow):
 
         self.addSubInterface(self.search_page, FIF.SEARCH, "网易云音乐搜索")
 
-        # 搜索页面（波点音乐）
-        self.bodian_page = BodianSearchPage()
-        self.bodian_page.setObjectName("BodianSearchPage")
-        self.bodian_page.song_selected.connect(self.on_song_selected)
-        self.bodian_page.add_to_playlist.connect(self._on_add_to_playlist)
+        # 歌单/专辑导入页面
+        self.import_page = NeteaseImportPage()
+        self.import_page.setObjectName("NeteaseImportPage")
+        self.import_page.song_selected.connect(self.on_song_selected)
+        self.import_page.songs_imported.connect(self._on_import_all)
+        self.import_page.add_to_playlist.connect(self._on_add_to_playlist)
 
-        self.addSubInterface(self.bodian_page, FIF.MUSIC, "波点音乐搜索")
+        self.addSubInterface(self.import_page, FIF.DOWN, "歌单/专辑导入")
 
         # 本地音乐页面
         self.local_page = LocalMusicPage()
@@ -1847,6 +2034,10 @@ class MusicPlayer(FluentWindow):
         self.playlist_page.play_mode_changed.connect(self._on_play_mode_changed)
         self.playlist_page.remove_song_requested.connect(self._on_remove_song)
         self.playlist_page.clear_playlist_requested.connect(self._on_clear_playlist)
+        self.playlist_page.save_playlist_requested.connect(self._on_save_playlist)
+        self.playlist_page.load_playlist_requested.connect(self._on_load_playlist)
+        self.playlist_page.delete_playlist_requested.connect(self._on_delete_playlist)
+        self.playlist_page.rename_playlist_requested.connect(self._on_rename_playlist)
 
         self.addSubInterface(self.playlist_page, FIF.PLAY_SOLID, "播放列表")
 
@@ -1881,6 +2072,11 @@ class MusicPlayer(FluentWindow):
         # 播放列表
         self.playlist = []
         self.current_index = -1
+        self.current_playlist_name = ""
+
+        # 加载已保存的歌单列表，不自动加载
+        self._saved_playlists = _list_playlist_files()
+        self.playlist_page.refresh_playlist_list(self._saved_playlists)
 
         # 系统托盘
         self.setup_tray()
@@ -1907,6 +2103,13 @@ class MusicPlayer(FluentWindow):
         artist = song_data.get('artist', '未知歌手')
         InfoBar.success("已添加", f"{name} - {artist}", duration=2000, parent=self)
 
+    def _on_import_all(self, songs):
+        """导入页面：全部添加到播放列表"""
+        for song in songs:
+            self.playlist.append(song)
+        self.playlist_page.set_playlist(self.playlist, self.current_index)
+        InfoBar.success("已添加", f"已将 {len(songs)} 首歌曲添加到播放列表", duration=2000, parent=self)
+
     def _on_playlist_song_selected(self, song_data, index):
         """播放列表选择歌曲"""
         self.current_index = index
@@ -1932,7 +2135,6 @@ class MusicPlayer(FluentWindow):
 
         # 更新所有页面
         self.search_page.update_now_playing(name, artist, album)
-        self.bodian_page.update_now_playing(name, artist, album)
         self.playlist_page.update_now_playing(name, artist, album)
         self.local_page.update_now_playing(name, artist, album)
 
@@ -1975,12 +2177,6 @@ class MusicPlayer(FluentWindow):
         self.island.update_progress(0, 0, 0)
         self.island.current_position_ms = 0
 
-        # 波点音乐有直接播放链接，先下载到本地再播放（避免 mp3float TLS 问题）
-        if source == 'bodian':
-            play_url = song_data.get('play_url', '')
-            if play_url:
-                threading.Thread(target=self._play_bodian_url, args=(play_url,), daemon=True).start()
-
         # 异步获取播放链接（网易云）和歌词
         self.song_fetcher.fetch(song_data, self._on_song_ready)
 
@@ -1992,7 +2188,7 @@ class MusicPlayer(FluentWindow):
 
         source = self.current_song.get('source', '')
 
-        if play_url and source != 'bodian':
+        if play_url:
             threading.Thread(target=self._download_and_play, args=(play_url,), daemon=True).start()
         elif not play_url and source == 'netease':
             InfoBar.warning("无法播放", "获取播放链接失败", duration=3000, parent=self)
@@ -2008,14 +2204,6 @@ class MusicPlayer(FluentWindow):
                 InfoBar.success("歌词已匹配", "已加载歌词", duration=2000, parent=self)
         else:
             InfoBar.warning("无歌词", "未找到歌词", duration=3000, parent=self)
-
-    def _play_bodian_url(self, play_url):
-        """后台下载波点音乐 URL 后播放"""
-        local_path = _download_to_temp(play_url)
-        if local_path and os.path.exists(local_path):
-            self._play_local_signal.emit(local_path)
-        else:
-            print("[播放] 波点音乐下载失败")
 
     def _download_and_play(self, play_url):
         """后台下载在线 URL 后播放（解决 mp3float TLS/backstep 问题）"""
@@ -2143,6 +2331,59 @@ class MusicPlayer(FluentWindow):
         self.current_index = -1
         self.playlist_page.set_playlist(self.playlist, self.current_index)
 
+    def _on_save_playlist(self, name):
+        """保存当前播放列表"""
+        if not self.playlist:
+            InfoBar.warning("提示", "播放列表为空，无法保存", duration=2000, parent=self)
+            return
+        if _save_playlist_file(name, self.playlist):
+            self.current_playlist_name = name
+            self._saved_playlists = _list_playlist_files()
+            self.playlist_page.refresh_playlist_list(self._saved_playlists, name)
+            InfoBar.success("保存成功", f"「{name}」共 {len(self.playlist)} 首歌曲", duration=2000, parent=self)
+        else:
+            InfoBar.error("保存失败", "文件写入失败", duration=2000, parent=self)
+
+    def _on_load_playlist(self, name):
+        """加载已保存的播放列表"""
+        songs = _load_playlist_file(name)
+        if not songs:
+            InfoBar.error("加载失败", f"「{name}」为空或文件损坏", duration=2000, parent=self)
+            return
+        self.playlist = songs
+        self.current_index = -1
+        self.current_playlist_name = name
+        self.playlist_page.set_playlist(self.playlist, self.current_index)
+        InfoBar.success("已加载", f"「{name}」共 {len(songs)} 首歌曲", duration=2000, parent=self)
+
+    def _on_delete_playlist(self, name):
+        """删除已保存的播放列表"""
+        if _delete_playlist_file(name):
+            if self.current_playlist_name == name:
+                self.current_playlist_name = ""
+            self._saved_playlists = _list_playlist_files()
+            self.playlist_page.refresh_playlist_list(self._saved_playlists, self.current_playlist_name)
+            InfoBar.success("已删除", f"「{name}」已删除", duration=2000, parent=self)
+        else:
+            InfoBar.error("删除失败", "文件删除失败", duration=2000, parent=self)
+
+    def _on_rename_playlist(self, old_name, new_name):
+        """重命名播放列表"""
+        songs = _load_playlist_file(old_name)
+        if not songs:
+            InfoBar.error("失败", f"无法读取「{old_name}」", duration=2000, parent=self)
+            return
+        _delete_playlist_file(old_name)
+        if _save_playlist_file(new_name, songs):
+            if self.current_playlist_name == old_name:
+                self.current_playlist_name = new_name
+            self._saved_playlists = _list_playlist_files()
+            self.playlist_page.refresh_playlist_list(self._saved_playlists, self.current_playlist_name)
+            InfoBar.success("重命名成功", f"「{old_name}」→「{new_name}」", duration=2000, parent=self)
+        else:
+            _save_playlist_file(old_name, songs)
+            InfoBar.error("失败", "重命名失败", duration=2000, parent=self)
+
     def setup_tray(self):
         self.tray_icon = QSystemTrayIcon(self)
         self.tray_icon.setIcon(QIcon.fromTheme("media-playback-start"))
@@ -2184,6 +2425,8 @@ class MusicPlayer(FluentWindow):
 
     def quit_app(self):
         self.player.stop()
+        if self.playlist and self.current_playlist_name:
+            _save_playlist_file(self.current_playlist_name, self.playlist)
         _cleanup_temp_files()
         self.island.close()
         self.tray_icon.hide()
