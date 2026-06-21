@@ -9,7 +9,7 @@
 ## ✨ 功能特性
 
 - 🎶 **[New]网易云音乐歌单&专辑导入** - 通过第三方 API 导入网易云音乐的歌单&专辑，输入ID即可导入
-- 📄 **[New]播放列表导出&导入** - 将播放列表保存为.json格式的文件，程序每次启动就会自动导入程序目录下的 'list' 文件夹内的.json列表，程序内支持重命名等操作
+- 📄 **[New]播放列表导出&导入** - 将播放列表保存为.json格式的文件，程序每次启动就会自动导入程序目录下的 `list` 文件夹内的.json列表，程序内支持重命名等操作
 - 🎵 **网易云音乐搜索** — 通过第三方 API 搜索并播放网易云音乐，支持默认/备用两种 API 源
 - 📁 **本地音乐播放** — 支持 mp3 / flac / ogg / m4a / aac / wav / wma 格式，自动读取内嵌元数据（歌名、歌手、专辑、歌词、封面）
 - 🏝️ **灵动岛悬浮窗** — 屏幕顶部居中的迷你播放控件，展开后显示歌词、进度条、播放控制
@@ -27,6 +27,7 @@
 
 ```
 Music-Island/
+├── list/            # 歌单&专辑存放文件夹
 ├── main.py          # 全部源码（单文件）
 ├── requirements.txt # Python 依赖
 ├── LICENSE          # MIT 协议
@@ -46,6 +47,7 @@ pip install -r requirements.txt
 # 运行
 python main.py
 ```
+> [!TIP]如果qfluentwidgets安装失败，可以尝试 pip install PyQt6-Fluent-Widgets
 
 ## 📦 主要依赖
 
